@@ -1,0 +1,37 @@
+# Example caller: plan every environment on pull requests, apply from main.
+# Required reviewers on the "prod" GitHub environment gate the prod apply.
+name: Infrastructure
+
+on:
+  pull_request:
+    paths: ["infra/**"]
+  push:
+    branches: [main]
+    paths: ["infra/**"]
+
+permissions:
+  contents: read
+
+jobs:
+  terraform:
+    strategy:
+      fail-fast: false
+      max-parallel: 1 # dev first, then prod
+      matrix:
+        include:
+          - environment: dev
+            role: arn:aws:iam::222222222222:role/github-deploy
+          - environment: prod
+            role: arn:aws:iam::333333333333:role/github-deploy
+    uses: pavangajjala/cicd-pipeline-library/.github/workflows/terraform.yml@v1
+    permissions:
+      contents: read
+      id-token: write
+    with:
+      working-directory: infra
+      environment: ${{ matrix.environment }}
+      aws-role-arn: ${{ matrix.role }}
+      var-file: envs/${{ matrix.environment }}.tfvars
+      backend-config: backend/${{ matrix.environment }}.hcl
+      apply: ${{ github.event_name == 'push' }}
+      vaultscan-gate: true

@@ -1,0 +1,33 @@
+# Example caller: build on pull requests, publish and promote from main.
+name: Service CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  image:
+    uses: pavangajjala/cicd-pipeline-library/.github/workflows/docker-build.yml@v1
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    with:
+      image-name: ghcr.io/example-org/orders
+      push: ${{ github.event_name == 'push' }}
+
+  promote-dev:
+    needs: image
+    if: github.event_name == 'push'
+    uses: pavangajjala/cicd-pipeline-library/.github/workflows/gitops-promote.yml@v1
+    with:
+      gitops-repository: example-org/platform-gitops
+      overlay-path: apps/orders/overlays/dev
+      image: ghcr.io/example-org/orders
+      tag: ${{ needs.image.outputs.version }}
+    secrets:
+      gitops-token: ${{ secrets.GITOPS_PR_TOKEN }}

@@ -1,0 +1,10 @@
+// Jenkinsfile for an infrastructure monorepo. The job gets STACK, ENVIRONMENT
+// and ACTION parameters; production applies wait for approval.
+@Library('cicd-pipeline-library@v1') _
+
+terraformPipeline(
+    stacks: ['network', 'eks', 'data'],
+    environments: ['dev', 'staging', 'prod'],
+    awsCredentialsId: 'aws-deploy',
+    approvers: 'platform-team'
+)

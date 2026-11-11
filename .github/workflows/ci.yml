@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  workflows:
+    name: Lint workflows
+    runs-on: ubuntu-latest
+    env:
+      ACTIONLINT_VERSION: "1.7.12"
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install actionlint
+        run: |
+          mkdir -p "$HOME/bin"
+          curl -fsSL "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz" \
+            | tar -xz -C "$HOME/bin" actionlint
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+      - name: actionlint (also runs shellcheck on run blocks)
+        run: actionlint .github/workflows/*.yml examples/*.yml
+
+  jenkins-library:
+    name: Jenkins library tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Groovy
+        run: sudo apt-get update -q && sudo apt-get install -y -q groovy
+      - name: Compile and test
+        run: ./jenkins/test/run.sh
