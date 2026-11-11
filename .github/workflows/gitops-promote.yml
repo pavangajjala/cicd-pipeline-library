@@ -1,0 +1,112 @@
+# Reusable workflow: promote an image by opening a pull request against a
+# GitOps repository. The pipeline never touches the cluster; Argo CD or Flux
+# picks the change up once the pull request is merged.
+#
+#   jobs:
+#     promote:
+#       uses: pavangajjala/cicd-pipeline-library/.github/workflows/gitops-promote.yml@v1
+#       with:
+#         gitops-repository: my-org/platform-gitops
+#         overlay-path: apps/my-service/overlays/prod
+#         image: ghcr.io/my-org/my-service
+#         tag: 1.8.0
+#       secrets:
+#         gitops-token: ${{ secrets.GITOPS_PR_TOKEN }}
+name: GitOps promote
+
+on:
+  workflow_call:
+    inputs:
+      gitops-repository:
+        description: owner/name of the repository that holds the Kustomize overlays
+        required: true
+        type: string
+      overlay-path:
+        description: Directory containing the kustomization.yaml to update
+        required: true
+        type: string
+      image:
+        description: Image name as referenced in the kustomization
+        required: true
+        type: string
+      tag:
+        description: New tag to deploy
+        required: true
+        type: string
+      base-branch:
+        type: string
+        default: main
+    secrets:
+      gitops-token:
+        description: Token with contents and pull-requests write access to the GitOps repository
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate inputs
+        env:
+          TAG: ${{ inputs.tag }}
+          OVERLAY: ${{ inputs.overlay-path }}
+        run: |
+          # Inputs end up in a branch name and a commit message, so keep them boring.
+          if ! [[ "$TAG" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]; then
+            echo "::error::tag '$TAG' is not a valid image tag"; exit 1
+          fi
+          if [[ "$OVERLAY" == /* || "$OVERLAY" == *..* ]]; then
+            echo "::error::overlay-path must be a relative path inside the repository"; exit 1
+          fi
+
+      - uses: actions/checkout@v7
+        with:
+          repository: ${{ inputs.gitops-repository }}
+          ref: ${{ inputs.base-branch }}
+          token: ${{ secrets.gitops-token }}
+
+      - name: Update the image tag
+        env:
+          IMAGE: ${{ inputs.image }}
+          TAG: ${{ inputs.tag }}
+          OVERLAY: ${{ inputs.overlay-path }}
+        run: |
+          cd "$OVERLAY"
+          kustomize edit set image "${IMAGE}=${IMAGE}:${TAG}"
+          git diff --stat
+
+      - name: Open a pull request
+        env:
+          GH_TOKEN: ${{ secrets.gitops-token }}
+          IMAGE: ${{ inputs.image }}
+          TAG: ${{ inputs.tag }}
+          OVERLAY: ${{ inputs.overlay-path }}
+          BASE: ${{ inputs.base-branch }}
+          SOURCE_REPO: ${{ github.repository }}
+          SOURCE_SHA: ${{ github.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if git diff --quiet; then
+            echo "Already at ${TAG}; nothing to promote." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          service="$(basename "$IMAGE")"
+          branch="promote/${service}-${TAG}-$(basename "$OVERLAY")"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$branch"
+          git commit -am "Promote ${service} to ${TAG} in ${OVERLAY}"
+          git push --set-upstream origin "$branch"
+
+          gh pr create \
+            --base "$BASE" \
+            --head "$branch" \
+            --title "Promote ${service} to ${TAG} ($(basename "$OVERLAY"))" \
+            --body "Image: \`${IMAGE}:${TAG}\`
+          Source: ${SOURCE_REPO}@${SOURCE_SHA}
+          Pipeline run: ${RUN_URL}
+
+          Merging this pull request deploys the change."
