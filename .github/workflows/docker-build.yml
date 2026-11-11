@@ -1,0 +1,147 @@
+# Reusable workflow: build an image, scan it, and only then push and sign it.
+#
+#   jobs:
+#     image:
+#       uses: pavangajjala/cicd-pipeline-library/.github/workflows/docker-build.yml@v1
+#       permissions:
+#         contents: read
+#         packages: write
+#         id-token: write
+#       with:
+#         image-name: ghcr.io/my-org/my-service
+name: Docker build
+
+on:
+  workflow_call:
+    inputs:
+      image-name:
+        description: Full image name without a tag, for example ghcr.io/my-org/my-service
+        required: true
+        type: string
+      context:
+        description: Build context directory
+        type: string
+        default: "."
+      dockerfile:
+        description: Path to the Dockerfile, relative to the repository root
+        type: string
+        default: Dockerfile
+      push:
+        description: Push and sign the image. Leave false on pull requests.
+        type: boolean
+        default: false
+      fail-on-severity:
+        description: Comma-separated severities that fail the build
+        type: string
+        default: CRITICAL,HIGH
+      registry:
+        description: Registry to log in to when pushing
+        type: string
+        default: ghcr.io
+    outputs:
+      digest:
+        description: Digest of the pushed image (empty when push is false)
+        value: ${{ jobs.build.outputs.digest }}
+      version:
+        description: Primary tag that was built
+        value: ${{ jobs.build.outputs.version }}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write # keyless signing
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+      version: ${{ steps.meta.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Work out tags and labels
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ inputs.image-name }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=ref,event=branch
+            type=ref,event=pr
+            type=sha,format=short
+
+      # Build into the local daemon first so the scan runs on exactly the
+      # image that would be pushed, before anything leaves the runner.
+      - name: Build for scanning
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: ${{ inputs.context }}
+          file: ${{ inputs.dockerfile }}
+          load: true
+          tags: scan-target:${{ github.sha }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Scan image for vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: scan-target:${{ github.sha }}
+          severity: ${{ inputs.fail-on-severity }}
+          ignore-unfixed: true
+          exit-code: "1"
+          format: table
+
+      - name: Log in to the registry
+        if: inputs.push
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ${{ inputs.registry }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push
+        id: push
+        if: inputs.push
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: ${{ inputs.context }}
+          file: ${{ inputs.dockerfile }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          provenance: true
+          sbom: true
+
+      - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+        if: inputs.push
+
+      # Sign the digest, not a tag: tags can be moved, digests cannot.
+      - name: Sign the image
+        if: inputs.push
+        env:
+          IMAGE: ${{ inputs.image-name }}
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: cosign sign --yes "${IMAGE}@${DIGEST}"
+
+      - name: Summary
+        if: inputs.push
+        env:
+          IMAGE: ${{ inputs.image-name }}
+          DIGEST: ${{ steps.push.outputs.digest }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          {
+            echo "### Image published"
+            echo ""
+            echo "\`${IMAGE}@${DIGEST}\`"
+            echo ""
+            echo "Tags:"
+            while IFS= read -r tag; do echo "- ${tag}"; done <<< "$TAGS"
+          } >> "$GITHUB_STEP_SUMMARY"
